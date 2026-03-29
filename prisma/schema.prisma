@@ -1,0 +1,785 @@
+// D.O.S. Collaboration OS - Multi-Tenant Schema
+// Architecture: Organization → Workspace → Users → Projects → Modules
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// MULTI-TENANT CORE
+// ============================================
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+  GUEST
+}
+
+enum UserMode {
+  DESIGN
+  INNOVATION
+  EDUCATION
+}
+
+enum SubscriptionPlan {
+  FREE
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  logo        String?
+  description String?
+  
+  // Subscription
+  plan        SubscriptionPlan @default(FREE)
+  trialEndsAt DateTime?
+  
+  // Settings
+  settings    String?  // JSON stored as string
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  workspaces  Workspace[]
+  members     OrganizationMember[]
+  invitations Invitation[]
+  
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  role           UserRole @default(MEMBER)
+  joinedAt       DateTime @default(now())
+  
+  // Relations
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([organizationId, userId])
+  @@map("organization_members")
+}
+
+model Invitation {
+  id             String     @id @default(cuid())
+  organizationId String
+  email          String
+  role           UserRole   @default(MEMBER)
+  token          String     @unique
+  status         String     @default("pending") // pending, accepted, declined, expired
+  expiresAt      DateTime
+  createdAt      DateTime   @default(now())
+  
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  @@map("invitations")
+}
+
+model Workspace {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  slug           String
+  description    String?
+  icon           String?
+  
+  // Settings
+  isDefault      Boolean  @default(false)
+  settings       String?  // JSON stored as string
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members        WorkspaceMember[]
+  projects       Project[]
+  channels       Channel[]
+  knowledgePages KnowledgePage[]
+  concepts       Concept[]
+  prompts        Prompt[]
+  meshNodes      MeshNode[]
+  files          File[]
+  
+  @@unique([organizationId, slug])
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id           String   @id @default(cuid())
+  workspaceId  String
+  userId       String
+  role         UserRole @default(MEMBER)
+  joinedAt     DateTime @default(now())
+  
+  // Relations
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([workspaceId, userId])
+  @@map("workspace_members")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  image         String?
+  password      String?
+  
+  // Profile
+  displayName   String?
+  bio           String?
+  location      String?
+  website       String?
+  
+  // Preferences
+  mode          UserMode  @default(DESIGN)
+  preferences   String?   // JSON stored as string
+  
+  // Settings
+  emailVerified DateTime?
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Relations
+  organizations   OrganizationMember[]
+  workspaces      WorkspaceMember[]
+  channelMembers  ChannelMember[]
+  messages        Message[]
+  tasks           Task[]
+  taskComments    TaskComment[]
+  reactions       MessageReaction[]
+  concepts        Concept[]
+  prompts         Prompt[]
+  meshNodes       MeshNode[]
+  activities      Activity[]
+  notifications   Notification[]
+  aiSessions      AISession[]
+  
+  @@map("users")
+}
+
+// ============================================
+// COMMUNICATION LAYER (Slack-like)
+// ============================================
+
+enum ChannelType {
+  PUBLIC
+  PRIVATE
+  DIRECT
+}
+
+model Channel {
+  id           String       @id @default(cuid())
+  workspaceId  String
+  name         String
+  slug         String
+  description  String?
+  type         ChannelType  @default(PUBLIC)
+  icon         String?
+  
+  // Settings
+  isArchived   Boolean      @default(false)
+  
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  
+  // Relations
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages     Message[]
+  members      ChannelMember[]
+  
+  @@unique([workspaceId, slug])
+  @@map("channels")
+}
+
+model ChannelMember {
+  id         String   @id @default(cuid())
+  channelId  String
+  userId     String
+  joinedAt   DateTime @default(now())
+  lastReadAt DateTime?
+  
+  // Relations
+  channel    Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([channelId, userId])
+  @@map("channel_members")
+}
+
+model Message {
+  id          String   @id @default(cuid())
+  channelId   String
+  userId      String
+  parentId    String?  // For threads
+  
+  content     String   // Markdown content
+  attachments String?  // JSON array of attachments
+  
+  // Metadata
+  isEdited    Boolean  @default(false)
+  isDeleted   Boolean  @default(false)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  channel     Channel           @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent      Message?          @relation("MessageThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies     Message[]         @relation("MessageThread")
+  reactions   MessageReaction[]
+  
+  @@map("messages")
+}
+
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  
+  createdAt DateTime @default(now())
+  
+  // Relations
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([messageId, userId, emoji])
+  @@map("message_reactions")
+}
+
+// ============================================
+// PROJECT LAYER (Asana-like + ABCoDE)
+// ============================================
+
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  ARCHIVED
+}
+
+enum ABCoDEPhase {
+  ACQUAINTANCE    // Discovery, Research, Understanding
+  BUILD_UP        // Development, Creation, Growth
+  CONTINUATION    // Maintenance, Evolution, Optimization
+  DETERIORATION   // Analysis, Problems, Challenges
+  ENDING          // Conclusion, Documentation, Archive
+}
+
+model Project {
+  id             String         @id @default(cuid())
+  workspaceId    String
+  name           String
+  slug           String
+  description    String?
+  icon           String?
+  color          String?
+  
+  // Status
+  status         ProjectStatus  @default(PLANNING)
+  progress       Int            @default(0)
+  
+  // ABCoDE Phase
+  currentPhase   ABCoDEPhase    @default(ACQUAINTANCE)
+  
+  // Dates
+  startDate      DateTime?
+  endDate        DateTime?
+  
+  // Settings
+  isArchived     Boolean        @default(false)
+  settings       String?        // JSON stored as string
+  
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  
+  // Relations
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tasks          Task[]
+  phases         ProjectPhase[]
+  deliverables   Deliverable[]
+  concepts       Concept[]
+  knowledgePages KnowledgePage[]
+  meshNodes      MeshNode[]
+  activities     Activity[]
+  
+  @@unique([workspaceId, slug])
+  @@map("projects")
+}
+
+model ProjectPhase {
+  id          String      @id @default(cuid())
+  projectId   String
+  phase       ABCoDEPhase
+  
+  // Phase Details
+  name        String
+  description String?
+  objectives  String?     // JSON array of objectives
+  
+  // Status
+  status      String      @default("pending") // pending, active, completed
+  progress    Int         @default(0)
+  
+  // Dates
+  startDate   DateTime?
+  endDate     DateTime?
+  completedAt DateTime?
+  
+  // Output
+  output      String?     // Generated output for this phase
+  insights    String?     // AI-generated insights
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  // Relations
+  project     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks       Task[]
+  
+  @@unique([projectId, phase])
+  @@map("project_phases")
+}
+
+model Task {
+  id           String     @id @default(cuid())
+  projectId    String
+  phaseId      String?
+  parentId     String?    // For subtasks
+  
+  title        String
+  description  String?
+  
+  // Assignment
+  assigneeId   String?
+  
+  // Status
+  status       String     @default("todo") // todo, in_progress, review, done
+  priority     String     @default("medium") // low, medium, high, urgent
+  
+  // Dates
+  dueDate      DateTime?
+  completedAt  DateTime?
+  
+  // Order
+  order        Int        @default(0)
+  
+  // ABCoDE Integration
+  abcodeTag    String?    // Which ABCoDE phase this task relates to
+  
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  
+  // Relations
+  project      Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  phase        ProjectPhase?  @relation(fields: [phaseId], references: [id], onDelete: SetNull)
+  parent       Task?          @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks     Task[]         @relation("TaskSubtasks")
+  assignee     User?          @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+  comments     TaskComment[]
+  attachments  TaskAttachment[]
+  
+  @@map("tasks")
+}
+
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  userId    String
+  content   String
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("task_comments")
+}
+
+model TaskAttachment {
+  id        String   @id @default(cuid())
+  taskId    String
+  name      String
+  url       String
+  type      String   // file type
+  size      Int?     // in bytes
+  
+  createdAt DateTime @default(now())
+  
+  // Relations
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  
+  @@map("task_attachments")
+}
+
+model Deliverable {
+  id          String   @id @default(cuid())
+  projectId   String
+  name        String
+  description String?
+  
+  // Status
+  status      String   @default("pending") // pending, in_progress, completed
+  progress    Int      @default(0)
+  
+  // Content
+  content     String?  // Markdown content
+  attachments String?  // JSON array of attachments
+  
+  // Dates
+  dueDate     DateTime?
+  completedAt DateTime?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  @@map("deliverables")
+}
+
+// ============================================
+// CONCEPT GENERATOR
+// ============================================
+
+model Concept {
+  id             String        @id @default(cuid())
+  workspaceId    String?
+  projectId      String?
+  userId         String
+  
+  title          String
+  description    String
+  category       String?       // product, service, experience, etc.
+  
+  // AI Generated
+  isAIGenerated  Boolean       @default(false)
+  aiPrompt       String?       // The prompt used to generate
+  
+  // Content
+  content        String?       // Markdown detailed content
+  tags           String?       // JSON array of tags
+  variants       String?       // JSON array of variants
+  
+  // Visual
+  imageUrl       String?
+  
+  // Status
+  status         String        @default("draft") // draft, refined, archived
+  
+  // Metrics
+  likes          Int           @default(0)
+  views          Int           @default(0)
+  
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  
+  // Relations
+  workspace      Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project        Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("concepts")
+}
+
+// ============================================
+// PROMPT BUILDER v2
+// ============================================
+
+model Prompt {
+  id             String   @id @default(cuid())
+  workspaceId    String?
+  userId         String
+  
+  title          String
+  description    String?
+  
+  // Structured Inputs
+  objective      String?  // What you want to achieve
+  context        String?  // Background information
+  desiredOutput  String?  // Expected output format
+  tone           String?  // Voice/tone preferences
+  constraints    String?  // JSON array of constraints
+  
+  // Generated Prompt
+  generatedPrompt String // The final optimized prompt
+  
+  // Template
+  isTemplate     Boolean  @default(false)
+  templateCategory String?
+  
+  // Metadata
+  model          String?  // Which AI model this is for
+  category       String?  // Category of prompt
+  
+  // Usage
+  usageCount     Int      @default(0)
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  workspace      Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("prompts")
+}
+
+model PromptTemplate {
+  id             String   @id @default(cuid())
+  name           String
+  description    String?
+  category       String
+  
+  // Template Structure
+  structure      String   // JSON template structure
+  
+  // Metadata
+  isPublic       Boolean  @default(false)
+  usageCount     Int      @default(0)
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  @@map("prompt_templates")
+}
+
+// ============================================
+// KNOWLEDGE SYSTEM (Notion-like)
+// ============================================
+
+model KnowledgePage {
+  id             String   @id @default(cuid())
+  workspaceId    String?
+  projectId      String?
+  parentId       String?  // For nested pages
+  
+  title          String
+  slug           String
+  icon           String?
+  coverImage     String?
+  
+  // Content
+  content        String   // Markdown content
+  
+  // Status
+  isArchived     Boolean  @default(false)
+  isPublished    Boolean  @default(false)
+  
+  // Order
+  order          Int      @default(0)
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  workspace      Workspace?     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project        Project?       @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  parent         KnowledgePage? @relation("KnowledgeHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children       KnowledgePage[] @relation("KnowledgeHierarchy")
+  
+  @@unique([workspaceId, slug])
+  @@map("knowledge_pages")
+}
+
+// ============================================
+// MESH LAYER (Innovation)
+// ============================================
+
+enum MeshNodeType {
+  USER
+  PROJECT
+  CONCEPT
+  TASK
+  KNOWLEDGE
+}
+
+model MeshNode {
+  id             String       @id @default(cuid())
+  workspaceId    String?
+  projectId      String?
+  userId         String?
+  
+  type           MeshNodeType
+  referenceId    String       // ID of the referenced entity
+  label          String
+  description    String?
+  
+  // Visualization
+  x              Float?
+  y              Float?
+  color          String?
+  size           Float?
+  
+  // Metadata
+  weight         Int          @default(1)  // Connection weight
+  
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  
+  // Relations
+  workspace      Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project        Project?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user           User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  outgoingEdges  MeshEdge[]   @relation("MeshEdgeSource")
+  incomingEdges  MeshEdge[]   @relation("MeshEdgeTarget")
+  
+  @@map("mesh_nodes")
+}
+
+model MeshEdge {
+  id           String   @id @default(cuid())
+  sourceId     String
+  targetId     String
+  
+  type         String   // created_by, works_on, relates_to, depends_on, etc.
+  label        String?
+  weight       Int      @default(1)
+  
+  // AI Suggestions
+  isAISuggested Boolean @default(false)
+  
+  createdAt    DateTime @default(now())
+  
+  // Relations
+  source       MeshNode @relation("MeshEdgeSource", fields: [sourceId], references: [id], onDelete: Cascade)
+  target       MeshNode @relation("MeshEdgeTarget", fields: [targetId], references: [id], onDelete: Cascade)
+  
+  @@unique([sourceId, targetId, type])
+  @@map("mesh_edges")
+}
+
+// ============================================
+// AI LAYER
+// ============================================
+
+model AISession {
+  id             String   @id @default(cuid())
+  userId         String
+  
+  type           String   // concept_generation, prompt_building, synthesis, suggestion
+  context        String?  // JSON context
+  
+  // Conversation
+  messages       String   // JSON array of messages
+  
+  // Status
+  status         String   @default("active") // active, completed, archived
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("ai_sessions")
+}
+
+model AISuggestion {
+  id             String   @id @default(cuid())
+  type           String   // task, concept, connection, insight
+  content        String   // JSON suggestion content
+  
+  // Context
+  projectId      String?
+  taskId         String?
+  conceptId      String?
+  
+  // Status
+  status         String   @default("pending") // pending, accepted, dismissed
+  
+  createdAt      DateTime @default(now())
+  
+  @@map("ai_suggestions")
+}
+
+// ============================================
+// ACTIVITY & NOTIFICATIONS
+// ============================================
+
+model Activity {
+  id             String   @id @default(cuid())
+  userId         String?
+  projectId      String?
+  
+  type           String   // task_completed, message_sent, concept_created, etc.
+  description    String
+  metadata       String?  // JSON additional data
+  
+  createdAt      DateTime @default(now())
+  
+  // Relations
+  user           User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  project        Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  
+  @@map("activities")
+}
+
+model Notification {
+  id             String   @id @default(cuid())
+  userId         String
+  
+  type           String   // mention, assignment, update, etc.
+  title          String
+  content        String?
+  link           String?  // URL to related content
+  
+  // Status
+  isRead         Boolean  @default(false)
+  readAt         DateTime?
+  
+  createdAt      DateTime @default(now())
+  
+  // Relations
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("notifications")
+}
+
+// ============================================
+// FILE STORAGE
+// ============================================
+
+model File {
+  id             String   @id @default(cuid())
+  name           String
+  originalName   String
+  mimeType       String
+  size           Int
+  url            String
+  
+  // Context
+  workspaceId    String?
+  projectId      String?
+  uploadedBy     String?
+  
+  createdAt      DateTime @default(now())
+  
+  // Relations
+  workspace      Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  @@map("files")
+}
